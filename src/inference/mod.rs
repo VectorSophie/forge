@@ -93,8 +93,23 @@ impl InferenceBackend for CandleBackend {
     }
 }
 
+pub struct MockBackend;
+
+#[async_trait]
+impl InferenceBackend for MockBackend {
+    async fn generate(&self, prompt: &str) -> Result<String, AppError> {
+        let code = prompt.split("Original Code:\n").last().unwrap_or("");
+        let mock_code = format!("// Mock AI completion\n{}", code);
+        Ok(mock_code)
+    }
+}
+
 pub fn get_backend(config: &Config) -> Box<dyn InferenceBackend> {
     if let Some(api_key) = &config.openrouter_api_key {
+        if api_key == "dummy_key_for_testing" {
+            tracing::info!("Using MockBackend for testing");
+            return Box::new(MockBackend);
+        }
         Box::new(OpenRouterBackend::new(api_key.clone()))
     } else {
         tracing::info!("No OPENROUTER_API_KEY found, falling back to Candle (unimplemented)");
