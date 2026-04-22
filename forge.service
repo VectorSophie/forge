@@ -1,0 +1,17 @@
+[Unit]
+Description=Forge AI Code Completion Service
+After=network.target
+
+[Service]
+Type=simple
+User=forge
+Group=forge
+WorkingDirectory=/opt/forge
+ExecStart=/opt/forge/forge
+Restart=always
+RestartSec=3
+EnvironmentFile=/opt/forge/.env
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

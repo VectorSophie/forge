@@ -1,0 +1,25 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["multipart", "macros"] }
+tokio = { version = "1.37", features = ["full"] }
+dashmap = "5.5"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.8", features = ["v4"] }
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+sha1 = "0.10"
+flate2 = "1.0"
+hex = "0.4"
+tower-http = { version = "0.5", features = ["limit", "trace"] }
+base64 = "0.22"
+dotenvy = "0.15"
+async-trait = "0.1.89"
+rand = "0.10.1"
