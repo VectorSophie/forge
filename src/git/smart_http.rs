@@ -6,12 +6,10 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use serde::Deserialize;
-use std::collections::HashMap;
 
 use crate::error::AppError;
+use crate::session::SessionStatus;
 use crate::state::AppState;
-#[allow(unused_imports)]
-use anyhow::anyhow;
 
 #[derive(Deserialize)]
 pub struct InfoRefsQuery {
@@ -23,13 +21,15 @@ fn pkt_line(s: &str) -> String {
     format!("{:04x}{}", len, s)
 }
 
-fn validate_auth(req: &Request, slug: &str, state: &AppState) -> Result<String, AppError> {
-    let auth_header = req
-        .headers()
+/// Extract the raw Authorization header value from a request as an owned String.
+fn extract_auth_header(req: &Request) -> Option<String> {
+    req.headers()
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .ok_or(AppError::Unauthorized)?;
+        .map(|s| s.to_owned())
+}
 
+async fn validate_auth(auth_header: &str, slug: &str, state: &AppState) -> Result<String, AppError> {
     if !auth_header.starts_with("Basic ") {
         return Err(AppError::Unauthorized);
     }
@@ -38,29 +38,34 @@ fn validate_auth(req: &Request, slug: &str, state: &AppState) -> Result<String, 
         .decode(&auth_header[6..])
         .map_err(|_| AppError::Unauthorized)?;
     let credentials = String::from_utf8(decoded).map_err(|_| AppError::Unauthorized)?;
-
     let parts: Vec<&str> = credentials.splitn(2, ':').collect();
     if parts.len() != 2 {
         return Err(AppError::Unauthorized);
     }
-    let (_, password) = (parts[0], parts[1]);
+    let password = parts[1].to_owned();
 
-    let session = state.sessions.get(slug).ok_or(AppError::NotFound)?;
-    if session.token != password {
+    // Extract what we need from the DashMap guard before any await points,
+    // since DashMap Ref guards are not Send.
+    let (token, expires_at, status_arc) = {
+        let session = state.sessions.get(slug).ok_or(AppError::NotFound)?;
+        (session.token.clone(), session.expires_at, session.status.clone())
+    };
+
+    if token != password {
         return Err(AppError::Unauthorized);
     }
-
-    if chrono::Utc::now() > session.expires_at {
-        drop(session);
+    if chrono::Utc::now() > expires_at {
         state.sessions.remove(slug);
         return Err(AppError::Unauthorized);
     }
 
-    let status = session.status.blocking_read();
-    if let crate::session::SessionStatus::Done { head_hash, .. } = &*status {
-        Ok(head_hash.clone())
-    } else {
-        Err(AppError::Internal(anyhow::anyhow!("Session not ready")))
+    let status = status_arc.read().await;
+    match &*status {
+        SessionStatus::Done { head_hash, .. } => Ok(head_hash.clone()),
+        SessionStatus::Failed(msg) => {
+            Err(AppError::BadRequest(format!("Job failed: {}", msg)))
+        }
+        _ => Err(AppError::BadRequest("Job not complete yet".into())),
     }
 }
 
@@ -71,44 +76,37 @@ pub async fn info_refs(
     req: Request,
 ) -> Result<impl IntoResponse, AppError> {
     if query.service.as_deref() != Some("git-upload-pack") {
-        return Err(AppError::BadRequest(
-            "Only git-upload-pack is supported".to_string(),
-        ));
+        return Err(AppError::BadRequest("Only git-upload-pack is supported".into()));
     }
 
-    let head_hash = match validate_auth(&req, &slug, &state) {
+    let auth_header = extract_auth_header(&req).unwrap_or_default();
+    // req is no longer needed; drop it so the non-Sync body doesn't cross await points.
+    drop(req);
+
+    let head_hash = match validate_auth(&auth_header, &slug, &state).await {
         Ok(h) => h,
         Err(_) => {
             return Ok((
                 StatusCode::UNAUTHORIZED,
                 [(header::WWW_AUTHENTICATE, "Basic realm=\"Forge\"")],
                 "Unauthorized",
-            )
-                .into_response());
+            ).into_response());
         }
     };
 
     let mut body = String::new();
     body.push_str(&pkt_line("# service=git-upload-pack\n"));
     body.push_str("0000");
-
     let capabilities = "symref=HEAD:refs/heads/main agent=forge/0.1.0";
-    let first_line = format!("{} HEAD\0{}\n", head_hash, capabilities);
-    body.push_str(&pkt_line(&first_line));
-
-    let second_line = format!("{} refs/heads/main\n", head_hash);
-    body.push_str(&pkt_line(&second_line));
+    body.push_str(&pkt_line(&format!("{} HEAD\0{}\n", head_hash, capabilities)));
+    body.push_str(&pkt_line(&format!("{} refs/heads/main\n", head_hash)));
     body.push_str("0000");
 
-    let headers = [
-        (
-            header::CONTENT_TYPE,
-            "application/x-git-upload-pack-advertisement".to_string(),
-        ),
-        (header::CACHE_CONTROL, "no-cache".to_string()),
-    ];
-
-    Ok((headers, body).into_response())
+    Ok((
+        [(header::CONTENT_TYPE, "application/x-git-upload-pack-advertisement".to_string()),
+         (header::CACHE_CONTROL, "no-cache".to_string())],
+        body,
+    ).into_response())
 }
 
 pub async fn upload_pack(
@@ -116,42 +114,42 @@ pub async fn upload_pack(
     Path(slug): Path<String>,
     req: Request,
 ) -> Result<impl IntoResponse, AppError> {
-    let _head_hash = match validate_auth(&req, &slug, &state) {
-        Ok(h) => h,
+    let auth_header = extract_auth_header(&req).unwrap_or_default();
+    // Drop req so the non-Sync Body doesn't cross await points.
+    drop(req);
+
+    match validate_auth(&auth_header, &slug, &state).await {
+        Ok(_) => {}
         Err(_) => {
             return Ok((
                 StatusCode::UNAUTHORIZED,
                 [(header::WWW_AUTHENTICATE, "Basic realm=\"Forge\"")],
                 "Unauthorized",
-            )
-                .into_response());
+            ).into_response());
         }
-    };
+    }
 
     let pack = {
-        let session = state.sessions.get(&slug).ok_or(AppError::NotFound)?;
-        let status = session.status.blocking_read();
-        if let crate::session::SessionStatus::Done { repo_pack, .. } = &*status {
-            repo_pack.clone()
-        } else {
-            return Err(AppError::Internal(anyhow::anyhow!("Session not ready")));
+        let status_arc = {
+            let session = state.sessions.get(&slug).ok_or(AppError::NotFound)?;
+            session.status.clone()
+        };
+        let status = status_arc.read().await;
+        match &*status {
+            SessionStatus::Done { repo_pack, .. } => repo_pack.clone(),
+            _ => return Err(AppError::BadRequest("Job not complete yet".into())),
         }
     };
-    // We invalidate the session immediately after first successful clone
+
     state.sessions.remove(&slug);
 
-    // Build the upload-pack response
     let mut resp_body = Vec::new();
     resp_body.extend_from_slice(b"0008NAK\n");
     resp_body.extend_from_slice(&pack);
 
-    let headers = [
-        (
-            header::CONTENT_TYPE,
-            "application/x-git-upload-pack-result".to_string(),
-        ),
-        (header::CACHE_CONTROL, "no-cache".to_string()),
-    ];
-
-    Ok((headers, Body::from(resp_body)).into_response())
+    Ok((
+        [(header::CONTENT_TYPE, "application/x-git-upload-pack-result".to_string()),
+         (header::CACHE_CONTROL, "no-cache".to_string())],
+        Body::from(resp_body),
+    ).into_response())
 }
