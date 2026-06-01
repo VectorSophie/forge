@@ -1,5 +1,5 @@
 app = "forge-ai"
-primary_region = "iad"
+primary_region = "nrt"
 
 [build]
 
