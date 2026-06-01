@@ -14,5 +14,5 @@ primary_region = "nrt"
   min_machines_running = 0
 
 [[vm]]
-  memory = "2gb"
-  cpus = 2
+  size = "shared-cpu-1x"
+  memory = "256mb"
