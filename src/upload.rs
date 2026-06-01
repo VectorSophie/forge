@@ -175,10 +175,10 @@ pub async fn upload_handler(
         for (filename, original) in &files {
             let lang = Language::from_filename(filename);
             let text = String::from_utf8_lossy(original).to_string();
-            let prompt = build_prompt(lang, &text);
+            let (system, user) = build_prompt(lang, &text);
 
             match backend
-                .generate_stream(&prompt, model.as_deref(), token_tx.clone())
+                .generate_stream(&system, &user, model.as_deref(), token_tx.clone())
                 .await
             {
                 Ok(completed) => {

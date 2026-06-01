@@ -61,13 +61,15 @@ fn load_model_once() -> Result<&'static ModelState, AppError> {
 }
 
 pub fn run_inference(
-    prompt: &str,
+    system: &str,
+    user: &str,
     tx: broadcast::Sender<String>,
 ) -> Result<String, AppError> {
     let state = load_model_once()?;
     let device = Device::Cpu;
 
-    let formatted = format!("<|user|>\n{prompt}<|end|>\n<|assistant|>");
+    // Phi-3 chat template with system + user roles
+    let formatted = format!("<|system|>\n{system}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>");
 
     let encoding = state
         .tokenizer
@@ -139,7 +141,7 @@ mod tests {
     fn candle_generates_nonempty_output() {
         let (tx, _) = broadcast::channel(512);
         let result =
-            run_inference("Original Code:\nfn add(a: i32, b: i32) -> i32 { todo!() }", tx);
+            run_inference("You are a code completion engine.", "Complete this file:\n\nfn add(a: i32, b: i32) -> i32 { todo!() }", tx);
         let output = result.expect("inference failed");
         assert!(!output.trim().is_empty());
     }

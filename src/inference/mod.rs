@@ -11,13 +11,15 @@ use tokio::sync::broadcast;
 pub trait InferenceBackend: Send + Sync {
     async fn generate(
         &self,
-        prompt: &str,
+        system: &str,
+        user: &str,
         model: Option<&str>,
     ) -> Result<String, AppError>;
 
     async fn generate_stream(
         &self,
-        prompt: &str,
+        system: &str,
+        user: &str,
         model: Option<&str>,
         tx: broadcast::Sender<String>,
     ) -> Result<String, AppError>;
@@ -60,7 +62,12 @@ fn strip_markdown_fences(s: &str) -> String {
 
 #[async_trait]
 impl InferenceBackend for OpenRouterBackend {
-    async fn generate(&self, prompt: &str, model: Option<&str>) -> Result<String, AppError> {
+    async fn generate(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+    ) -> Result<String, AppError> {
         let model = model.unwrap_or("qwen/qwen3-coder:free");
         let response = self
             .client
@@ -68,7 +75,11 @@ impl InferenceBackend for OpenRouterBackend {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&json!({
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}]
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user}
+                ]
             }))
             .send()
             .await?;
@@ -85,19 +96,24 @@ impl InferenceBackend for OpenRouterBackend {
 
     async fn generate_stream(
         &self,
-        prompt: &str,
+        system: &str,
+        user: &str,
         model: Option<&str>,
         tx: broadcast::Sender<String>,
     ) -> Result<String, AppError> {
         use futures_util::StreamExt;
 
-        // Fallback chain: try each model in order, skip on 429
         let fallback_models: &[&str] = &[
             model.unwrap_or("qwen/qwen3-coder:free"),
             "nousresearch/hermes-3-llama-3.1-405b:free",
             "meta-llama/llama-3.2-3b-instruct:free",
             "liquid/lfm-2.5-1.2b-instruct:free",
         ];
+
+        let messages = json!([
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user}
+        ]);
 
         let mut last_err = String::new();
         let mut response_opt = None;
@@ -113,7 +129,8 @@ impl InferenceBackend for OpenRouterBackend {
                     .json(&json!({
                         "model": m,
                         "stream": true,
-                        "messages": [{"role": "user", "content": prompt}]
+                        "temperature": 0,
+                        "messages": messages
                     }))
                     .send()
                     .await?;
@@ -121,19 +138,15 @@ impl InferenceBackend for OpenRouterBackend {
                 if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                     let body = resp.text().await.unwrap_or_default();
                     if attempts < 2 {
-                        // One quick retry with the Retry-After delay
-                        let secs = body.contains("retry_after_seconds")
-                            .then(|| body.split("retry_after_seconds\":").nth(1)
-                                .and_then(|s| s.split(',').next())
-                                .and_then(|s| s.trim().parse::<f64>().ok())
-                                .map(|f| (f as u64).min(30))
-                                .unwrap_or(15))
+                        let secs = body.split("retry_after_seconds\":").nth(1)
+                            .and_then(|s| s.split(',').next())
+                            .and_then(|s| s.trim().parse::<f64>().ok())
+                            .map(|f| (f as u64).min(30))
                             .unwrap_or(15);
                         tracing::info!("429 on {} — waiting {}s", m, secs);
                         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
                         continue;
                     }
-                    // Both attempts rate-limited — try next model
                     tracing::info!("429 on {} after {} attempts, trying next model", m, attempts);
                     last_err = format!("429 on {}", m);
                     continue 'outer;
@@ -189,20 +202,27 @@ pub struct CandleBackend;
 
 #[async_trait]
 impl InferenceBackend for CandleBackend {
-    async fn generate(&self, prompt: &str, model: Option<&str>) -> Result<String, AppError> {
+    async fn generate(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+    ) -> Result<String, AppError> {
         let (tx, _) = broadcast::channel(512);
-        self.generate_stream(prompt, model, tx).await
+        self.generate_stream(system, user, model, tx).await
     }
 
     async fn generate_stream(
         &self,
-        prompt: &str,
+        system: &str,
+        user: &str,
         _model: Option<&str>,
         tx: broadcast::Sender<String>,
     ) -> Result<String, AppError> {
         use crate::inference::candle::run_inference;
-        let prompt = prompt.to_string();
-        tokio::task::spawn_blocking(move || run_inference(&prompt, tx))
+        let system = system.to_string();
+        let user = user.to_string();
+        tokio::task::spawn_blocking(move || run_inference(&system, &user, tx))
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking: {}", e)))?
     }
@@ -214,18 +234,24 @@ pub struct MockBackend;
 
 #[async_trait]
 impl InferenceBackend for MockBackend {
-    async fn generate(&self, prompt: &str, _model: Option<&str>) -> Result<String, AppError> {
+    async fn generate(
+        &self,
+        system: &str,
+        user: &str,
+        _model: Option<&str>,
+    ) -> Result<String, AppError> {
         let (tx, _) = broadcast::channel(512);
-        self.generate_stream(prompt, None, tx).await
+        self.generate_stream(system, user, None, tx).await
     }
 
     async fn generate_stream(
         &self,
-        prompt: &str,
+        _system: &str,
+        user: &str,
         _model: Option<&str>,
         tx: broadcast::Sender<String>,
     ) -> Result<String, AppError> {
-        let code = prompt.split("Original Code:\n").last().unwrap_or("");
+        let code = user.split("Complete this file:\n\n").last().unwrap_or(user);
         let mock = format!("// Mock AI completion\n{}", code);
         for word in mock.split_inclusive(' ') {
             let _ = tx.send(word.to_string());
@@ -254,7 +280,9 @@ mod tests {
     #[tokio::test]
     async fn mock_generate_with_model_param() {
         let backend = MockBackend;
-        let result = backend.generate("Original Code:\nfn foo() {}", Some("gpt-4")).await;
+        let result = backend
+            .generate("be a coder", "Complete this file:\n\nfn foo() {}", Some("gpt-4"))
+            .await;
         assert!(result.unwrap().contains("// Mock AI completion"));
     }
 
@@ -262,7 +290,9 @@ mod tests {
     async fn mock_generate_stream_sends_tokens() {
         let backend = MockBackend;
         let (tx, mut rx) = broadcast::channel(64);
-        let result = backend.generate_stream("Original Code:\nhello", None, tx).await;
+        let result = backend
+            .generate_stream("be a coder", "Complete this file:\n\nhello", None, tx)
+            .await;
         assert!(result.is_ok());
         assert!(rx.try_recv().is_ok());
     }

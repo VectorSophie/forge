@@ -1,40 +1,28 @@
 use crate::language::Language;
 
-pub fn build_prompt(language: Language, code: &str) -> String {
-    let mut prompt = String::new();
-    prompt.push_str("You are an expert AI coding assistant. Your task is to complete the following code file by replacing any TODO, pass, NotImplementedError, or incomplete logic with robust, idiomatic code.\n");
-    prompt.push_str("Output ONLY the completed code. Do NOT wrap it in markdown blocks (e.g. ```). Do NOT provide explanations. Add imports only if needed.\n\n");
+/// Returns (system_message, user_message) for chat APIs.
+pub fn build_prompt(language: Language, code: &str) -> (String, String) {
+    let lang_hint = match language {
+        Language::Python => "Python. Follow PEP8. Keep all existing function signatures and types exactly as-is.",
+        Language::Rust => "Rust. Keep all existing function signatures, types, and trait impls exactly as-is. Use idiomatic Result, ownership, and match.",
+        Language::JavaScript => "JavaScript ES6+. Keep all existing function signatures exactly as-is.",
+        Language::TypeScript => "TypeScript. Keep all existing function signatures and type annotations exactly as-is.",
+        Language::Dockerfile => "Dockerfile. Preserve all existing directives and layering.",
+        Language::Unknown => "the language shown in the file.",
+    };
 
-    match language {
-        Language::Python => {
-            prompt.push_str("Language: Python. Follow PEP8. Ensure proper asyncio/argparse usage if present in the skeleton.\n\n");
-        }
-        Language::Rust => {
-            prompt.push_str(
-                "Language: Rust. Use idiomatic Result, ownership, match, and error handling.\n\n",
-            );
-        }
-        Language::JavaScript => {
-            prompt.push_str("Language: JavaScript. Use ES6+ syntax, async/promises, and minimal dependencies.\n\n");
-        }
-        Language::TypeScript => {
-            prompt.push_str(
-                "Language: TypeScript. Use strong typing, ES6+ syntax, and idiomatic patterns.\n\n",
-            );
-        }
-        Language::Dockerfile => {
-            prompt.push_str(
-                "Language: Dockerfile. Preserve sensible layering and minimal image size.\n\n",
-            );
-        }
-        Language::Unknown => {
-            prompt.push_str("Language: Unknown generic text code file.\n\n");
-        }
-    }
+    let system = format!(
+        "You are a code-completion engine. Rules:\n\
+         1. Output ONLY the completed source file. No markdown fences, no explanations, no commentary.\n\
+         2. Fill in TODO, pass, todo!(), unimplemented!(), NotImplementedError, and empty function bodies.\n\
+         3. NEVER change existing function signatures, return types, struct fields, or public API.\n\
+         4. NEVER remove existing code — only add or replace placeholder bodies.\n\
+         5. Language: {lang_hint}"
+    );
 
-    prompt.push_str("Original Code:\n");
-    prompt.push_str(code);
-    prompt
+    let user = format!("Complete this file:\n\n{code}");
+
+    (system, user)
 }
 
 #[cfg(test)]
@@ -43,9 +31,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt() {
-        let code = "fn main() { TODO!(); }";
-        let prompt = build_prompt(Language::Rust, code);
-        assert!(prompt.contains("Language: Rust. Use idiomatic Result"));
-        assert!(prompt.contains(code));
+        let code = "fn main() { todo!(); }";
+        let (system, user) = build_prompt(Language::Rust, code);
+        assert!(system.contains("Rust"));
+        assert!(system.contains("NEVER change existing function signatures"));
+        assert!(user.contains(code));
     }
 }
