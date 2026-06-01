@@ -61,7 +61,7 @@ fn strip_markdown_fences(s: &str) -> String {
 #[async_trait]
 impl InferenceBackend for OpenRouterBackend {
     async fn generate(&self, prompt: &str, model: Option<&str>) -> Result<String, AppError> {
-        let model = model.unwrap_or("meta-llama/llama-3.1-8b-instruct:free");
+        let model = model.unwrap_or("qwen/qwen3-coder:free");
         let response = self
             .client
             .post("https://openrouter.ai/api/v1/chat/completions")
@@ -91,7 +91,7 @@ impl InferenceBackend for OpenRouterBackend {
     ) -> Result<String, AppError> {
         use futures_util::StreamExt;
 
-        let model = model.unwrap_or("meta-llama/llama-3.1-8b-instruct:free");
+        let model = model.unwrap_or("qwen/qwen3-coder:free");
         let response = self
             .client
             .post("https://openrouter.ai/api/v1/chat/completions")
