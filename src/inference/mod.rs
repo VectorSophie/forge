@@ -92,25 +92,45 @@ impl InferenceBackend for OpenRouterBackend {
         use futures_util::StreamExt;
 
         let model = model.unwrap_or("qwen/qwen3-coder:free");
-        let response = self
-            .client
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&json!({
-                "model": model,
-                "stream": true,
-                "messages": [{"role": "user", "content": prompt}]
-            }))
-            .send()
-            .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "OpenRouter HTTP {}: {}", status, body
-            )));
-        }
+        let mut attempts = 0u32;
+        let response = loop {
+            attempts += 1;
+            let resp = self
+                .client
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&json!({
+                    "model": model,
+                    "stream": true,
+                    "messages": [{"role": "user", "content": prompt}]
+                }))
+                .send()
+                .await?;
+
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts < 4 {
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(15)
+                    .min(60);
+                tracing::info!("OpenRouter 429 — retrying in {}s (attempt {})", retry_after, attempts);
+                tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+                continue;
+            }
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "OpenRouter HTTP {}: {}", status, body
+                )));
+            }
+
+            break resp;
+        };
 
         let mut stream = response.bytes_stream();
         let mut full = String::new();
