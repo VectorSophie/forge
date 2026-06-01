@@ -36,6 +36,17 @@ impl IntoResponse for AppError {
     }
 }
 
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppError::Internal(err) => write!(f, "{}", err),
+            AppError::BadRequest(msg) => write!(f, "{}", msg),
+            AppError::Unauthorized => write!(f, "Unauthorized"),
+            AppError::NotFound => write!(f, "Not found"),
+        }
+    }
+}
+
 impl<E> From<E> for AppError
 where
     E: Into<anyhow::Error>,
