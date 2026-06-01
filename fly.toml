@@ -1,4 +1,4 @@
-﻿app = "forge-ai"
+app = "forge-ai"
 primary_region = "iad"
 
 [build]
