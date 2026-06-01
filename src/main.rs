@@ -16,6 +16,7 @@ mod prompt;
 mod rate_limit;
 mod session;
 mod state;
+mod status;
 mod upload;
 
 use crate::config::Config;
