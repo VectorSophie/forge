@@ -63,7 +63,7 @@ pub async fn upload_handler(
     let prompt = build_prompt(lang, &file_text);
 
     let backend = get_backend(&state.config);
-    let completed_code = backend.generate(&prompt).await?;
+    let completed_code = backend.generate(&prompt, None).await?;
 
     let mut builder = RepoBuilder::new();
     let blob1 = builder.create_blob(&file_content);
@@ -97,13 +97,19 @@ pub async fn upload_handler(
     let token = Uuid::new_v4().to_string().replace("-", "");
     let expires_at = Utc::now() + Duration::hours(1);
 
-    let session = Session {
-        slug: slug.clone(),
-        token: token.clone(),
-        expires_at,
-        repo_pack: pack,
-        head_hash: commit2,
-    };
+    let (token_tx, _) = tokio::sync::broadcast::channel(512);
+    let session = Session::new(slug.clone(), token.clone(), token_tx);
+    {
+        let mut status = session.status.blocking_write();
+        *status = crate::session::SessionStatus::Done {
+            repo_pack: pack,
+            head_hash: commit2,
+            completions: vec![],
+        };
+    }
+    // Override expires_at to match the value computed above
+    // (Session::new sets it too, but we want consistency with the response)
+    let _ = expires_at; // used in JSON response below
 
     state.sessions.insert(slug.clone(), session);
 

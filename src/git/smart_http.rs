@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use crate::error::AppError;
 use crate::state::AppState;
+#[allow(unused_imports)]
+use anyhow::anyhow;
 
 #[derive(Deserialize)]
 pub struct InfoRefsQuery {
@@ -54,7 +56,12 @@ fn validate_auth(req: &Request, slug: &str, state: &AppState) -> Result<String, 
         return Err(AppError::Unauthorized);
     }
 
-    Ok(session.head_hash.clone())
+    let status = session.status.blocking_read();
+    if let crate::session::SessionStatus::Done { head_hash, .. } = &*status {
+        Ok(head_hash.clone())
+    } else {
+        Err(AppError::Internal(anyhow::anyhow!("Session not ready")))
+    }
 }
 
 pub async fn info_refs(
@@ -121,11 +128,16 @@ pub async fn upload_pack(
         }
     };
 
-    let session = state.sessions.get(&slug).ok_or(AppError::NotFound)?;
-    let pack = session.repo_pack.clone();
-
+    let pack = {
+        let session = state.sessions.get(&slug).ok_or(AppError::NotFound)?;
+        let status = session.status.blocking_read();
+        if let crate::session::SessionStatus::Done { repo_pack, .. } = &*status {
+            repo_pack.clone()
+        } else {
+            return Err(AppError::Internal(anyhow::anyhow!("Session not ready")));
+        }
+    };
     // We invalidate the session immediately after first successful clone
-    drop(session);
     state.sessions.remove(&slug);
 
     // Build the upload-pack response
