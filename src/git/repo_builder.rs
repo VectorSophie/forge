@@ -72,6 +72,21 @@ impl RepoBuilder {
         hash
     }
 
+    /// Build a tree object containing multiple files at repo root.
+    pub fn create_multi_tree(&mut self, files: &[(&str, &str)]) -> String {
+        let mut content = Vec::new();
+        for (filename, blob_hash) in files {
+            content.extend_from_slice(b"100644 ");
+            content.extend_from_slice(filename.as_bytes());
+            content.push(0);
+            let raw = hex::decode(blob_hash).unwrap();
+            content.extend_from_slice(&raw);
+        }
+        let (hash, _, content) = Self::hash_object("tree", &content);
+        self.add_object(2, &content);
+        hash
+    }
+
     pub fn create_commit(
         &mut self,
         tree_hash: &str,
@@ -111,5 +126,21 @@ impl RepoBuilder {
         let checksum = hasher.finalize();
         pack.extend_from_slice(&checksum);
         pack
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_file_tree_round_trip() {
+        let mut b = RepoBuilder::new();
+        let h1 = b.create_blob(b"fn main() {}");
+        let h2 = b.create_blob(b"x = 1");
+        let tree = b.create_multi_tree(&[("main.rs", &h1), ("lib.py", &h2)]);
+        assert_eq!(tree.len(), 40); // sha1 hex is 40 chars
+        let pack = b.build_pack();
+        assert!(pack.starts_with(b"PACK"));
     }
 }
