@@ -104,6 +104,14 @@ impl InferenceBackend for OpenRouterBackend {
             .send()
             .await?;
 
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "OpenRouter HTTP {}: {}", status, body
+            )));
+        }
+
         let mut stream = response.bytes_stream();
         let mut full = String::new();
 
@@ -183,7 +191,7 @@ impl InferenceBackend for MockBackend {
 
 pub fn get_backend(config: &Config) -> Box<dyn InferenceBackend> {
     if let Some(api_key) = &config.openrouter_api_key {
-        if api_key == "dummy_key_for_testing" {
+        if api_key.trim() == "dummy_key_for_testing" {
             tracing::info!("Using MockBackend");
             return Box::new(MockBackend);
         }
