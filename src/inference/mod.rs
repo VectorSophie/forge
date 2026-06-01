@@ -91,46 +91,71 @@ impl InferenceBackend for OpenRouterBackend {
     ) -> Result<String, AppError> {
         use futures_util::StreamExt;
 
-        let model = model.unwrap_or("qwen/qwen3-coder:free");
+        // Fallback chain: try each model in order, skip on 429
+        let fallback_models: &[&str] = &[
+            model.unwrap_or("qwen/qwen3-coder:free"),
+            "nousresearch/hermes-3-llama-3.1-405b:free",
+            "meta-llama/llama-3.2-3b-instruct:free",
+            "liquid/lfm-2.5-1.2b-instruct:free",
+        ];
 
-        let mut attempts = 0u32;
-        let response = loop {
-            attempts += 1;
-            let resp = self
-                .client
-                .post("https://openrouter.ai/api/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&json!({
-                    "model": model,
-                    "stream": true,
-                    "messages": [{"role": "user", "content": prompt}]
-                }))
-                .send()
-                .await?;
+        let mut last_err = String::new();
+        let mut response_opt = None;
 
-            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts < 4 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(15)
-                    .min(60);
-                tracing::info!("OpenRouter 429 — retrying in {}s (attempt {})", retry_after, attempts);
-                tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-                continue;
+        'outer: for &m in fallback_models {
+            let mut attempts = 0u32;
+            loop {
+                attempts += 1;
+                let resp = self
+                    .client
+                    .post("https://openrouter.ai/api/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .json(&json!({
+                        "model": m,
+                        "stream": true,
+                        "messages": [{"role": "user", "content": prompt}]
+                    }))
+                    .send()
+                    .await?;
+
+                if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    let body = resp.text().await.unwrap_or_default();
+                    if attempts < 2 {
+                        // One quick retry with the Retry-After delay
+                        let secs = body.contains("retry_after_seconds")
+                            .then(|| body.split("retry_after_seconds\":").nth(1)
+                                .and_then(|s| s.split(',').next())
+                                .and_then(|s| s.trim().parse::<f64>().ok())
+                                .map(|f| (f as u64).min(30))
+                                .unwrap_or(15))
+                            .unwrap_or(15);
+                        tracing::info!("429 on {} — waiting {}s", m, secs);
+                        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                        continue;
+                    }
+                    // Both attempts rate-limited — try next model
+                    tracing::info!("429 on {} after {} attempts, trying next model", m, attempts);
+                    last_err = format!("429 on {}", m);
+                    continue 'outer;
+                }
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    last_err = format!("OpenRouter HTTP {}: {}", status, body);
+                    tracing::info!("Error on {}: {}", m, last_err);
+                    continue 'outer;
+                }
+
+                tracing::info!("Using model: {}", m);
+                response_opt = Some(resp);
+                break 'outer;
             }
+        }
 
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "OpenRouter HTTP {}: {}", status, body
-                )));
-            }
-
-            break resp;
-        };
+        let response = response_opt.ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!("All models failed: {}", last_err))
+        })?;
 
         let mut stream = response.bytes_stream();
         let mut full = String::new();
